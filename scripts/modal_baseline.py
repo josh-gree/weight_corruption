@@ -46,7 +46,7 @@ def _wikitext2_perplexity(model, tokenizer, device, max_length=512, stride=256) 
     import torch
     from datasets import load_dataset
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join(dataset["text"])
     encodings = tokenizer(text, return_tensors="pt")
     input_ids = encodings.input_ids
