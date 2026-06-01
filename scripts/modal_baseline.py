@@ -63,7 +63,11 @@ def run_baseline() -> dict:
 
     summary: dict = {}
     for task, metrics in results["results"].items():
-        summary[task] = {k: v for k, v in metrics.items() if not k.endswith(",none")}
+        summary[task] = {
+            k.replace(",none", ""): v
+            for k, v in metrics.items()
+            if "stderr" not in k and k not in ("alias",)
+        }
 
     print("\n" + "=" * 60)
     print(f"BASELINE RESULTS — {MODEL_NAME}")
