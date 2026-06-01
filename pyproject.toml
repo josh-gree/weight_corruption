@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "weight-corruption"
 version = "0.1.0"
-description = "Systematic investigation of transformer weight corruption"
+description = "Systematic weight corruption analysis for Pythia (GPT-NeoX) models"
 requires-python = ">=3.9"
 dependencies = [
     "torch>=2.0",
