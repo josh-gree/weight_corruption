@@ -247,8 +247,15 @@ def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None,
             all_losses_list.append(l.cpu())
             all_preds_list.append(p.cpu())
 
-        all_losses = torch.cat(all_losses_list, dim=0)
-        all_preds  = torch.cat(all_preds_list,  dim=0)
+        # Pad sub-batch tensors to the same T before catting (each chunk was
+        # padded to its own max length, so T may differ across chunks).
+        max_t = max(l.size(1) for l in all_losses_list)
+        all_losses = torch.cat(
+            [torch.nn.functional.pad(l, (0, max_t - l.size(1)), value=float("nan"))
+             for l in all_losses_list], dim=0)
+        all_preds = torch.cat(
+            [torch.nn.functional.pad(p, (0, max_t - p.size(1)), value=0)
+             for p in all_preds_list], dim=0)
         all_input  = _stack(all_tokens, pad_id)  # CPU, for indexing
 
         # Score each example
