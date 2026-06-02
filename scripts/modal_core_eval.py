@@ -325,8 +325,9 @@ def run_core_eval(model_name: str) -> dict:
 
 
 @app.local_entrypoint()
-def main():
-    all_results = list(run_core_eval.map(MODELS))
+def main(model: str = ""):
+    targets = [model] if model else MODELS
+    all_results = list(run_core_eval.map(targets))
     print("\n" + "=" * 60)
     print("DCLM CORE SCORES")
     print("=" * 60)
