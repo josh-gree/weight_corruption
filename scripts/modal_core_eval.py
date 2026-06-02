@@ -159,11 +159,12 @@ def _forward(model, input_ids_tensor):
 
 
 # ---------------------------------------------------------------------------
-# Single-example and full-task evaluation
+# Batched task evaluation
 # ---------------------------------------------------------------------------
 
-def _evaluate_example(idx, model, tokenizer, data, device, task_meta, max_seq_len=None):
-    import random, torch
+def _prepare_example(idx, data, tokenizer, task_meta, max_seq_len):
+    """Tokenize one example; return (flat_tokens, flat_starts, flat_ends, gold, task_type)."""
+    import random
     item = data[idx]
     task_type = task_meta["task_type"]
     delim = task_meta["continuation_delimiter"]
@@ -187,7 +188,6 @@ def _evaluate_example(idx, model, tokenizer, data, device, task_meta, max_seq_le
     else:
         raise ValueError(task_type)
 
-    # Truncate to max_seq_len if needed (take last max_seq_len tokens)
     if max_seq_len is not None:
         new_tokens, new_starts, new_ends = [], [], []
         for t, s, e in zip(tokens, starts, ends):
@@ -201,27 +201,53 @@ def _evaluate_example(idx, model, tokenizer, data, device, task_meta, max_seq_le
             new_ends.append(e)
         tokens, starts, ends = new_tokens, new_starts, new_ends
 
+    return tokens, starts, ends, item["gold"], task_type
+
+
+def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None, batch_size=32):
+    """Evaluate all examples, batching multiple examples into each forward pass."""
+    import torch
+
     pad_id = tokenizer.bos_token_id or 0
-    input_ids = _stack(tokens, pad_id).to(device)
-
-    with torch.no_grad():
-        losses, preds = _forward(model, input_ids)
-
-    if task_type == "language_modeling":
-        si, ei = starts[0], ends[0]
-        predicted = preds[0, si - 1 : ei - 1]
-        actual = input_ids[0, si:ei]
-        return torch.all(predicted == actual).item()
-    else:
-        mean_losses = [losses[i, starts[i] - 1 : ends[i] - 1].mean().item()
-                       for i in range(len(tokens))]
-        return mean_losses.index(min(mean_losses)) == item["gold"]
-
-
-def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None):
     correct = 0
-    for idx in range(len(data)):
-        correct += float(_evaluate_example(idx, model, tokenizer, data, device, task_meta, max_seq_len))
+
+    for batch_start in range(0, len(data), batch_size):
+        batch_indices = range(batch_start, min(batch_start + batch_size, len(data)))
+
+        # Prepare all sequences for this batch of examples
+        all_tokens, all_starts, all_ends = [], [], []
+        example_meta = []  # (seq_offset, n_seqs, gold, task_type) per example
+
+        for idx in batch_indices:
+            tokens, starts, ends, gold, task_type = _prepare_example(
+                idx, data, tokenizer, task_meta, max_seq_len
+            )
+            seq_offset = len(all_tokens)
+            all_tokens.extend(tokens)
+            all_starts.extend(starts)
+            all_ends.extend(ends)
+            example_meta.append((seq_offset, len(tokens), gold, task_type))
+
+        # Single forward pass over all sequences in the batch
+        input_ids = _stack(all_tokens, pad_id).to(device)
+        with torch.no_grad():
+            losses, preds = _forward(model, input_ids)
+
+        # Score each example using its slice of the results
+        for seq_offset, n_seqs, gold, task_type in example_meta:
+            if task_type == "language_modeling":
+                row = seq_offset  # always 1 sequence for LM
+                si, ei = all_starts[row], all_ends[row]
+                predicted = preds[row, si - 1 : ei - 1]
+                actual = input_ids[row, si:ei]
+                correct += float(torch.all(predicted == actual).item())
+            else:
+                mean_losses = [
+                    losses[seq_offset + i, all_starts[seq_offset + i] - 1 : all_ends[seq_offset + i] - 1].mean().item()
+                    for i in range(n_seqs)
+                ]
+                correct += float(mean_losses.index(min(mean_losses)) == gold)
+
     return correct / len(data)
 
 
@@ -275,7 +301,7 @@ def run_core_eval(model_name: str) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
     model = model.to("cuda").eval()
     max_seq_len = getattr(model.config, "max_position_embeddings", None)
     print(f"max_seq_len={max_seq_len}")
