@@ -201,7 +201,8 @@ def _prepare_example(idx, data, tokenizer, task_meta, max_seq_len):
             new_ends.append(e)
         tokens, starts, ends = new_tokens, new_starts, new_ends
 
-    return tokens, starts, ends, item["gold"], task_type
+    gold = item.get("gold")  # None for language_modeling tasks
+    return tokens, starts, ends, gold, task_type
 
 
 def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None, batch_size=32):
