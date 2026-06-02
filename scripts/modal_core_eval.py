@@ -285,10 +285,10 @@ def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None,
 @app.function(
     image=image,
     gpu="t4",
-    timeout=10800,  # 3 h — 22 tasks × ~4 min each
+    timeout=10800,
     volumes={"/results": volume},
 )
-def run_core_eval(model_name: str) -> dict:
+def run_core_eval(model_name: str, max_per_task: int = -1) -> dict:
     import csv, io, json as _json, os, random, requests, shutil, tempfile, time, zipfile
 
     import torch
@@ -349,6 +349,8 @@ def run_core_eval(model_name: str) -> dict:
 
         # Consistent shuffle (matches nanochat)
         random.Random(1337).shuffle(data)
+        if max_per_task > 0:
+            data = data[:max_per_task]
 
         t0 = time.time()
         print(f"  {label} ({task_meta['num_fewshot']}-shot, {task_meta['task_type']}, n={len(data)})...", flush=True)
@@ -364,12 +366,14 @@ def run_core_eval(model_name: str) -> dict:
 
     out = {
         "model": model_name,
+        "max_per_task": max_per_task,
         "core_score": core_score,
         "results": results,
         "centered_results": centered_results,
     }
     safe_model = model_name.replace("/", "_")
-    out_path = f"/results/core_eval_{safe_model}.json"
+    suffix = f"_n{max_per_task}" if max_per_task > 0 else ""
+    out_path = f"/results/core_eval_{safe_model}{suffix}.json"
     with open(out_path, "w") as fh:
         _json.dump(out, fh, indent=2)
     volume.commit()
@@ -378,9 +382,9 @@ def run_core_eval(model_name: str) -> dict:
 
 
 @app.local_entrypoint()
-def main(model: str = ""):
+def main(model: str = "", max_per_task: int = -1):
     targets = [model] if model else MODELS
-    all_results = list(run_core_eval.map(targets))
+    all_results = list(run_core_eval.map(targets, kwargs={"max_per_task": max_per_task}))
     print("\n" + "=" * 60)
     print("DCLM CORE SCORES")
     print("=" * 60)
