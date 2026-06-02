@@ -205,19 +205,27 @@ def _prepare_example(idx, data, tokenizer, task_meta, max_seq_len):
     return tokens, starts, ends, gold, task_type
 
 
-def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None, batch_size=32):
-    """Evaluate all examples, batching multiple examples into each forward pass."""
+def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None,
+                   example_batch=64, max_fwd_seqs=16):
+    """Evaluate all examples.
+
+    example_batch: number of examples to tokenise together (reduces Python overhead).
+    max_fwd_seqs:  max sequences per GPU forward pass (controls peak VRAM use).
+                   With 4 choices and 2048-token 10-shot prompts, each sequence
+                   uses ~800 tokens × 50k vocab × fp16 ≈ 80MB of logit memory,
+                   so 16 seqs ≈ 1.3 GB — safe on a T4.
+    """
     import torch
 
     pad_id = tokenizer.bos_token_id or 0
     correct = 0
 
-    for batch_start in range(0, len(data), batch_size):
-        batch_indices = range(batch_start, min(batch_start + batch_size, len(data)))
+    for batch_start in range(0, len(data), example_batch):
+        batch_indices = range(batch_start, min(batch_start + example_batch, len(data)))
 
-        # Prepare all sequences for this batch of examples
+        # CPU work: tokenise all examples in this batch
         all_tokens, all_starts, all_ends = [], [], []
-        example_meta = []  # (seq_offset, n_seqs, gold, task_type) per example
+        example_meta = []
 
         for idx in batch_indices:
             tokens, starts, ends, gold, task_type = _prepare_example(
@@ -229,22 +237,33 @@ def _evaluate_task(model, tokenizer, data, device, task_meta, max_seq_len=None, 
             all_ends.extend(ends)
             example_meta.append((seq_offset, len(tokens), gold, task_type))
 
-        # Single forward pass over all sequences in the batch
-        input_ids = _stack(all_tokens, pad_id).to(device)
-        with torch.no_grad():
-            losses, preds = _forward(model, input_ids)
+        # GPU work: forward in sub-batches capped at max_fwd_seqs
+        all_losses_list, all_preds_list = [], []
+        for fwd_start in range(0, len(all_tokens), max_fwd_seqs):
+            chunk = all_tokens[fwd_start : fwd_start + max_fwd_seqs]
+            input_chunk = _stack(chunk, pad_id).to(device)
+            with torch.no_grad():
+                l, p = _forward(model, input_chunk)
+            all_losses_list.append(l.cpu())
+            all_preds_list.append(p.cpu())
 
-        # Score each example using its slice of the results
+        all_losses = torch.cat(all_losses_list, dim=0)
+        all_preds  = torch.cat(all_preds_list,  dim=0)
+        all_input  = _stack(all_tokens, pad_id)  # CPU, for indexing
+
+        # Score each example
         for seq_offset, n_seqs, gold, task_type in example_meta:
             if task_type == "language_modeling":
-                row = seq_offset  # always 1 sequence for LM
+                row = seq_offset
                 si, ei = all_starts[row], all_ends[row]
-                predicted = preds[row, si - 1 : ei - 1]
-                actual = input_ids[row, si:ei]
+                predicted = all_preds[row, si - 1 : ei - 1]
+                actual    = all_input[row, si : ei]
                 correct += float(torch.all(predicted == actual).item())
             else:
                 mean_losses = [
-                    losses[seq_offset + i, all_starts[seq_offset + i] - 1 : all_ends[seq_offset + i] - 1].mean().item()
+                    all_losses[seq_offset + i,
+                               all_starts[seq_offset + i] - 1 :
+                               all_ends[seq_offset + i]   - 1].mean().item()
                     for i in range(n_seqs)
                 ]
                 correct += float(mean_losses.index(min(mean_losses)) == gold)
